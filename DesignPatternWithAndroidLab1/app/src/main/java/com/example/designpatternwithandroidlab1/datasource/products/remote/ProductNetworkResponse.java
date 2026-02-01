@@ -1,4 +1,4 @@
-package com.example.designpatternwithandroidlab1.datasource;
+package com.example.designpatternwithandroidlab1.datasource.products.remote;
 
 import com.example.designpatternwithandroidlab1.models.Product;
 

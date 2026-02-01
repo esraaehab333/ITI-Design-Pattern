@@ -1,7 +1,4 @@
-package com.example.designpatternwithandroidlab1.datasource;
-
-import static android.view.View.GONE;
-import static android.view.View.VISIBLE;
+package com.example.designpatternwithandroidlab1.datasource.products.remote;
 
 import com.example.designpatternwithandroidlab1.models.Product;
 import com.example.designpatternwithandroidlab1.models.ProductResponse;

@@ -1,18 +1,27 @@
 package com.example.designpatternwithandroidlab1.models;
 
+import androidx.room.ColumnInfo;
+import androidx.room.Entity;
+import androidx.room.PrimaryKey;
+
 import com.example.designpatternwithandroidlab1.network.Network;
 import com.google.gson.annotations.SerializedName;
-
+@Entity(tableName = "products")
 public class Product {
     @SerializedName("id")
+    @PrimaryKey
     private int id;
     @SerializedName("thumbnail")
+    @ColumnInfo(name="thumbnail")
     private String thumnail;
     @SerializedName("brand")
+    @ColumnInfo(name="brand")
     private String brand;
     @SerializedName("price")
+    @ColumnInfo(name="price")
     private double price;
     @SerializedName("title")
+    @ColumnInfo(name="title")
     private String title;
     public String getThumnail() {
         return thumnail;

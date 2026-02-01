@@ -20,10 +20,11 @@ import java.util.List;
 public class ProductAdapter extends RecyclerView.Adapter<ProductAdapter.ProductViewHolder> {
 
     private List<Product> productList;
+    OnProductClick onProductClick;
 
-
-    public ProductAdapter() {
+    public ProductAdapter(OnProductClick onProductClick) {
         this.productList = new ArrayList<>();
+        this.onProductClick = onProductClick;
     }
     public void setProductList(List<Product> productList) {
         this.productList = productList;
@@ -54,7 +55,6 @@ public class ProductAdapter extends RecyclerView.Adapter<ProductAdapter.ProductV
         private TextView movieTitleTextView;
         private TextView movieCategoryTextView;
         private Button addToFavoritesButton;
-
         public ProductViewHolder(@NonNull View itemView) {
             super(itemView);
             movieImageView = itemView.findViewById(R.id.iv_poster);
@@ -69,7 +69,10 @@ public class ProductAdapter extends RecyclerView.Adapter<ProductAdapter.ProductV
             Glide.with(itemView)
                     .load(product.getThumnail())
                     .into(movieImageView);
-
+            addToFavoritesButton.setOnClickListener(view -> {
+                onProductClick.addToFav(product);
+                    }
+            );
         }
     }
 }

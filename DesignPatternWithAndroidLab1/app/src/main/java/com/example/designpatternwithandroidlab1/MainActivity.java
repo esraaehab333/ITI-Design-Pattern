@@ -8,6 +8,7 @@ import android.widget.Button;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.example.designpatternwithandroidlab1.allproduct.allProducts;
+import com.example.designpatternwithandroidlab1.fav.FavActivity;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -35,7 +36,7 @@ public class MainActivity extends AppCompatActivity {
         favMoviesBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-//                startActivity(new Intent(MainActivity.this, FavMoviesActivity.class));
+               startActivity(new Intent(MainActivity.this, FavActivity.class));
             }
         });
     }
