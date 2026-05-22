@@ -22,6 +22,9 @@
 13. [Common Bugs & Senior-Level Notes](#13-common-bugs--senior-level-notes)
 14. [Resources & Further Study](#14-resources--further-study)
 15. [Architecture Evolution Summary](#15-architecture-evolution-summary)
+16. [MVVM Architecture — ViewModel + LiveData](#16-mvvm-architecture--viewmodel--livedata)
+17. [MVVM + Coroutines](#17-mvvm--coroutines)
+18. [Architecture Evolution Summary (Full)](#18-architecture-evolution-summary-full)
 
 ---
 
@@ -1064,3 +1067,410 @@ Step 6: + LiveData
 | MVVM + Hilt | Full DI, no Singletons | Steep learning curve |
 
 The architecture you saw in these lectures is **MVP + Repository + LiveData** — a solid, battle-tested combination used in production Java Android apps.
+
+---
+
+## 16. MVVM Architecture — ViewModel + LiveData
+
+MVVM is the natural evolution of MVP. Instead of the Presenter calling the View directly through an interface, the ViewModel exposes **observable state**. The View watches that state and reacts automatically — the ViewModel never knows which View (or how many Views) is observing it.
+
+```
+MVVM = MVP + observable data type + without View interface
+```
+
+| | MVP | MVVM |
+|---|---|---|
+| Communication | Presenter → View interface (direct call) | ViewModel → LiveData → View (reactive) |
+| View interface | Required | Not needed |
+| Rotation survival | Manual (`onAttach` / `onDetach`) | Automatic via `ViewModelStore` |
+| Testability | Good (mock the View) | Better (no View reference at all) |
+| Multiple Views on same data | Need multiple Presenters | One ViewModel, many observers |
+
+### Why MVVM? Two Motivating Cases
+
+**Case 1 — Multi-step registration flow**  
+Each screen posts a different piece of data to the API (photo, name, phone, document). Passing all that data between screens through Intent extras gets messy fast. A shared ViewModel owned at the Activity or Navigation graph level carries that state cleanly across all fragments without any coupling between screens.
+
+**Case 2 — Same business logic, different UIs**  
+Three screens show identical data but with different layouts. Creating three Presenters with identical logic is wasteful. One ViewModel serves all three — each View observes the same LiveData; the ViewModel never knows which one is active.
+
+---
+
+### 16.1 — Observable Data Types
+
+State inside a ViewModel must be an **observable data type** — a plain primitive won't notify anyone when it changes.
+
+| Type | Language | Lifecycle-aware? | Best for |
+|---|---|---|---|
+| `LiveData` | Java & Kotlin | ✅ built-in | Android Views, Room integration |
+| `StateFlow` | Kotlin only | ❌ manual (`repeatOnLifecycle`) | ViewModel state in Kotlin projects |
+| `SharedFlow` | Kotlin only | ❌ manual | One-shot events (navigation, snackbars) |
+| `State` (Compose) | Kotlin only | ✅ Compose-aware | Jetpack Compose UI |
+| `Channel` | Kotlin only | ❌ manual | Single-consumer producer/consumer |
+
+> 🔬 **Interview question:** know the difference between `LiveData`, `StateFlow`, `SharedFlow`, and `Channel` — replay behaviour, lifecycle handling, and when to use each.
+
+---
+
+### 16.2 — MutableLiveData vs LiveData — Encapsulation
+
+`MutableLiveData` exposes `setValue()` / `postValue()` to anyone. That breaks encapsulation — only the ViewModel should ever change its own state. The fix is a private mutable backing field exposed as a read-only `LiveData`:
+
+```kotlin
+// Inside ViewModel — private mutable, public read-only
+private val _isLoading = MutableLiveData<Boolean>()
+val isLoading: LiveData<Boolean>
+    get() = _isLoading          // observer can read, nobody outside can write
+
+// Only the ViewModel sets it
+_isLoading.value = true
+```
+
+#### setValue vs postValue
+
+```kotlin
+// setValue() — call from the MAIN thread only
+_isLoading.value = false
+
+// postValue() — safe from a background thread
+// posts the update onto the main thread queue internally
+_isLoading.postValue(false)
+```
+
+> **Senior note:** `postValue()` is asynchronous. If you call it multiple times in quick succession, only the last value is delivered. Prefer `setValue()` whenever you are already on the main thread.
+
+---
+
+### 16.3 — The ViewModel
+
+```kotlin
+class AllMoviesViewModel(context: Context) : ViewModel() {
+
+    private val moviesRepository = MoviesRepository(context)
+
+    private val _isLoading = MutableLiveData<Boolean>()
+    val isLoading: LiveData<Boolean> get() = _isLoading
+
+    private val _allMovies = MutableLiveData<List<Movie>>()
+    val allMovies: LiveData<List<Movie>> get() = _allMovies
+
+    private val _error = MutableLiveData<String>()
+    val error: LiveData<String> get() = _error
+
+    private val _addedToFavSuccess = MutableLiveData<Boolean>()
+    val addedToFavSuccess: LiveData<Boolean> get() = _addedToFavSuccess
+
+    fun getAllMovies() {
+        _isLoading.value = true
+        moviesRepository.getAllMovies(object : MoviesNetworkResponse {
+            override fun onSuccess(movies: List<Movie>) {
+                _isLoading.value = false
+                _allMovies.value = movies
+            }
+            override fun onFailure(errorMessage: String) {
+                _isLoading.value = false
+                _error.value = errorMessage
+            }
+            override fun serverError(errorMessage: String) {
+                _isLoading.value = false
+                _error.value = errorMessage
+            }
+        })
+    }
+
+    fun addToFav(movie: Movie) {
+        try {
+            moviesRepository.insertMovieToFav(movie)
+            _addedToFavSuccess.value = true
+        } catch (e: Exception) {
+            _addedToFavSuccess.value = false
+            _error.value = "Couldn't add movie: ${e.message}"
+        }
+    }
+}
+```
+
+---
+
+### 16.4 — Observing in the Activity
+
+The Activity no longer implements a View interface. It just observes and reacts:
+
+```kotlin
+class AllMoviesActivity : AppCompatActivity(), OnMovieClicked {
+
+    private lateinit var viewModel: AllMoviesViewModel
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_all_movies)
+
+        // wire up views + adapter...
+
+        val factory = AllMoviesViewModelFactory(repo = MoviesRepository(application))
+        viewModel = ViewModelProvider(this, factory)[AllMoviesViewModel::class.java]
+        viewModel.getAllMovies()
+        initObservers()
+    }
+
+    private fun initObservers() {
+        viewModel.isLoading.observe(this) { loading ->
+            if (loading) showLoading() else hideLoading()
+        }
+        viewModel.allMovies.observe(this) { movies ->
+            adapter.setList(movies)
+        }
+        viewModel.error.observe(this) { msg ->
+            showError(msg)
+        }
+    }
+
+    override fun addToFav(movie: Movie) { viewModel.addToFav(movie) }
+}
+```
+
+---
+
+### 16.5 — ViewModel Lifecycle — Surviving Configuration Changes
+
+When the screen rotates, the Activity is destroyed and recreated — but the ViewModel is **not**. Android retains it inside a `ViewModelStore` attached to the Activity's non-configuration instance.
+
+```
+ViewModelProvider(this).get(AllMoviesViewModel::class.java)
+        ↓
+ViewModelStore (a Map keyed by class name)
+        ↓
+If exists → return the same instance
+If not    → call Factory → create new instance
+```
+
+| Event | Activity | ViewModel |
+|---|---|---|
+| Screen rotation | Destroyed & recreated | Survives — same instance returned |
+| Back pressed / `finish()` | Destroyed | Destroyed — `onCleared()` called |
+| Process death | Destroyed | Destroyed — use `SavedStateHandle` to persist |
+
+> **⚠️ The ViewModel must never hold a reference to an Activity, Fragment, or any View.** If it does, the old Activity leaks — the ViewModel outlives it but keeps it in memory.
+
+---
+
+### 16.6 — ViewModelFactory (Passing Constructor Arguments)
+
+`ViewModelProvider`'s default factory only handles zero-argument constructors. If your ViewModel needs a Repository (or any other dependency), you must supply a custom factory:
+
+```kotlin
+class AllMoviesViewModelFactory(val repo: MoviesRepository) : ViewModelProvider.Factory {
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        return AllMoviesViewModel(moviesRepository = repo) as T
+    }
+}
+
+// In the Activity:
+val factory = AllMoviesViewModelFactory(repo = MoviesRepository(application))
+viewModel   = ViewModelProvider(this, factory)[AllMoviesViewModel::class.java]
+```
+
+> 🔬 **For you to research:** Kotlin Generics — the `<T : ViewModel>` syntax is a generic upper bound constraint. Understanding variance (`in`, `out`) is a frequent interview topic.
+
+---
+
+### 16.7 — AndroidViewModel (ViewModel with Application Context)
+
+A plain `ViewModel` must never hold an Activity `Context` — it would keep the dead Activity in memory. If you genuinely need context inside the ViewModel (e.g. to instantiate Room), extend `AndroidViewModel` instead. It receives and holds the `Application`, which lives as long as the process:
+
+```kotlin
+class FavViewModel(app: Application) : AndroidViewModel(application = app) {
+
+    private val moviesRepository = MoviesRepository(context = app)
+
+    private val _onDeleteSuccess = MutableLiveData<Boolean>()
+    val onDeleteSuccess: LiveData<Boolean> get() = _onDeleteSuccess
+
+    // Room returns LiveData — Activity observes it, gets updates automatically
+    fun getFavMovies(): LiveData<List<Movie>> = moviesRepository.getAllFavMovies()
+
+    fun deleteFavMovie(movie: Movie) {
+        moviesRepository.deleteMovieFromFav(movie)
+        _onDeleteSuccess.value = true
+    }
+}
+```
+
+| | `ViewModel` | `AndroidViewModel` |
+|---|---|---|
+| Constructor arg | None (or via Factory) | `Application` (injected automatically) |
+| Has `Context`? | No — inject deps via Factory | Yes — `Application` context |
+| Use when | Pure business logic | Needs Application context (DB, SharedPrefs) |
+
+---
+
+## 17. MVVM + Coroutines
+
+Coroutines replace the callback (`MoviesNetworkResponse`) pattern entirely. Instead of passing a callback object, suspend functions just return (or throw) — the coroutine runtime handles suspension transparently.
+
+### Step 1 — Make the data layer suspend
+
+```kotlin
+// MoviesService.kt — Retrofit supports suspend natively
+interface MoviesService {
+    @GET("discover/movie")
+    suspend fun getMovies(): Response<MovieResponse>
+}
+
+// MoviesRemoteDataSource.kt — return Result<T> instead of callbacks
+class MoviesRemoteDataSource {
+    suspend fun getAllMovies(): Result<List<Movie>> {
+        val response = moviesService.getMovies()
+        return if (response.isSuccessful) {
+            Result.success(response.body()?.results ?: emptyList())
+        } else {
+            Result.failure(Exception("Error ${response.code()}: ${response.message()}"))
+        }
+    }
+}
+```
+
+> 🔬 **For you to research:** `runCatching { }` — stdlib wrapper that executes a block and wraps any thrown exception in `Result.failure` automatically. Also research custom exception hierarchies in Kotlin.
+
+### Step 2 — Launch from the ViewModel with `viewModelScope`
+
+```kotlin
+fun getAllMovies() {
+    _isLoading.value = true
+    viewModelScope.launch {           // cancelled automatically when ViewModel is cleared
+        val result = moviesRepository.getAllMovies()
+        result.onSuccess { movies ->
+            _isLoading.value = false
+            _allMovies.value = movies
+        }.onFailure { e ->
+            _isLoading.value = false
+            _error.value = "Couldn't load movies: ${e.message}"
+        }
+    }
+}
+```
+
+> **`viewModelScope`** is pre-configured with `Dispatchers.Main` and a `SupervisorJob`. It is automatically cancelled when `onCleared()` fires — no manual `Job` management needed.
+
+---
+
+### 17.1 — Coroutine Context
+
+A `CoroutineContext` is a combination of four elements. This is a common interview topic:
+
+| Element | What it controls |
+|---|---|
+| `Job` | Lifecycle — parent/child hierarchy, cancellation propagation |
+| `Dispatcher` | Which thread pool runs the coroutine (`Main`, `IO`, `Default`, `Unconfined`) |
+| `CoroutineName` | Debug label visible in stack traces |
+| `CoroutineExceptionHandler` | Uncaught exception fallback for top-level coroutines |
+
+```kotlin
+// Manual scope (when NOT inside a ViewModel)
+val scope = CoroutineScope(Job() + Dispatchers.IO)
+
+// Dispatcher selection — the suspend function is responsible:
+suspend fun getMovies(): List<Movie> {
+    // network I/O          → Dispatchers.IO
+    // CPU-heavy parsing    → Dispatchers.Default
+    // UI update            → Dispatchers.Main
+}
+```
+
+> **When should a function be `suspend`?** When it contains another suspend call OR blocking code (disk I/O, heavy computation). The `suspend` modifier is a contract: *"I may take time; I will not block your thread while waiting."*
+
+### 17.2 — Dispatcher Choice
+
+| Dispatcher | Thread pool | Use for |
+|---|---|---|
+| `Dispatchers.Main` | UI thread | LiveData updates, View interaction |
+| `Dispatchers.IO` | Expandable pool (64 threads) | Network, disk, database reads/writes |
+| `Dispatchers.Default` | CPU-count threads | JSON parsing, sorting, heavy computation |
+| `Dispatchers.Unconfined` | Caller's thread | Testing, rarely used in production |
+
+### 17.3 — Result\<T\> — Built-in Success/Failure Wrapper
+
+```kotlin
+Result.success(value)           // wraps a success value
+Result.failure(exception)       // wraps a Throwable
+
+result.onSuccess  { value -> /* use it */ }
+result.onFailure  { e     -> /* handle it */ }
+result.getOrNull()              // value or null
+result.getOrThrow()             // value or throws
+result.getOrDefault(fallback)   // value or a default
+```
+
+---
+
+## 18. Architecture Evolution Summary (Full)
+
+```
+Step 1: Everything in Activity
+        ← messy, untestable, impossible to maintain
+
+Step 2: + DataSource layer (Remote + Local)
+        ← business logic out of Activity, Activity still coordinates everything
+
+Step 3: + Room (LocalDataSource)
+        ← offline support, but writes still block the main thread (bug!)
+
+Step 4: + Presenter (MVP) with onAttach / onDetach
+        ← Activity is a dumb View, Presenter is testable with JUnit
+
+Step 5: + Repository
+        ← single source of truth, Presenter doesn't know where data comes from
+
+Step 6: + LiveData
+        ← reactive UI, lifecycle-safe, no manual threads for reads
+
+Step 7: + ViewModel (MVVM)
+        ← no View interface, survives rotation, no onAttach/onDetach
+
+Step 8: + Coroutines (viewModelScope)
+        ← no callbacks, sequential-looking async code, automatic cancellation
+
+Step 9: + Hilt
+        ← no manual Singletons, no ViewModelFactory boilerplate, full DI
+```
+
+| Pattern | Pro | Con |
+|---|---|---|
+| MVC | Simple to start | Activity does everything |
+| MVP | Testable Presenter | Manual memory management (attach/detach) |
+| MVVM + ViewModel | Survives rotation, no View coupling | Kotlin-oriented, requires LiveData/Flow |
+| MVVM + Coroutines | No callback hell, readable async | Coroutine scope & dispatcher knowledge needed |
+| MVVM + Hilt | Full DI, zero manual Singletons | Steep initial learning curve |
+
+### 🔬 Additional Concepts to Research (MVVM / Coroutines)
+
+| Topic | Why It Matters |
+|---|---|
+| **Kotlin Generics** | The `<T : ViewModel>` bound in `ViewModelFactory` — upper bounds, variance (`in`/`out`) |
+| **`runCatching { }`** | Stdlib shorthand: wraps a block in `Result`, catches any exception automatically |
+| **Custom Exceptions** | Typed hierarchy (`NetworkException`, `ServerException`) instead of raw `Exception` — cleaner error handling |
+| **`SavedStateHandle`** | Survives process death (unlike `ViewModel` alone) — inject into ViewModel via `SavedStateViewModelFactory` |
+| **`SupervisorJob` vs `Job`** | `SupervisorJob`: child failure doesn't cancel siblings. Regular `Job`: one failure cancels all. `viewModelScope` uses `SupervisorJob` |
+| **`repeatOnLifecycle`** | The correct way to collect `StateFlow` / `SharedFlow` in an Activity — stops collection when the View is stopped |
+| **Flow from Room** | Room can return `Flow<List<Movie>>` instead of `LiveData` — use `collectAsState()` in Compose or `repeatOnLifecycle` in Views |
+| **`withContext()`** | Switch dispatcher mid-coroutine without launching a new one — e.g. do IO work then switch to Main to update UI |
+| **`async` / `await`** | Run two suspend calls in parallel and wait for both results — vs `launch` which is fire-and-forget |
+
+### 🔬 Concepts to Research Yourself
+
+| Topic | Why It Matters |
+|---|---|
+| **Java Reflection** | How `retrofit.create(MoviesService.class)` implements the interface at runtime without you writing the code |
+| **Annotation Processing (APT)** | How `@GET`, `@Entity`, `@Dao` generate code at compile time — Room's DAO impl is generated this way |
+| **Bearer Token Auth** | Production APIs use `Authorization: Bearer <token>` headers — see the `AuthInterceptor` in section 5.3 |
+| **Generic Classes in Java** | Build a reusable `NetworkResponse<T>` instead of one callback interface per feature |
+| **DiffUtil** | Smarter RecyclerView updates — only re-renders changed items instead of the whole list |
+| **Offline-First Strategy** | Show cached Room data instantly on open, refresh from network in background — the Facebook approach |
+| **State Holders** | The formal Android architecture concept: anything that owns and survives UI state |
+| **ViewModel (MVVM)** | The next evolution after MVP — the ViewModel survives configuration changes (rotation) automatically |
+| **Hilt / Dagger** | Dependency Injection framework — eliminates manual Singleton management entirely |
+| **LiveData vs StateFlow vs SharedFlow** | See comparison table in section 11 |
+| **NetworkBoundResource** | Google's pattern for offline-first: always emit from DB, trigger network refresh, emit loading/success/error |
+
+
+
